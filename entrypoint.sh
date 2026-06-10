@@ -83,7 +83,18 @@ ${CLIENT_ENCODING:+client_encoding = ${CLIENT_ENCODING}\n}\
 
 # Write the password with MD5 encryption, to avoid printing it during startup.
 # Notice that `docker inspect` will show unencrypted env variables.
-if [ -n "${DATABASE_URLS}" ]; then
+# Railway: dedicated upstream input. When UPSTREAM_POSTGRESQL_HOST is set,
+# DATABASE_URL is NOT parsed — it stays the app-facing variable pointing at
+# this pgbouncer — and the upstream connection is assembled from it plus the
+# standard libpq variables (PGPORT/PGUSER/PGPASSWORD/PGDATABASE).
+if [ -n "${UPSTREAM_POSTGRESQL_HOST}" ]; then
+  DB_HOST="${UPSTREAM_POSTGRESQL_HOST}"
+  DB_PORT="${PGPORT:-5432}"
+  DB_USER="${PGUSER:-postgres}"
+  DB_PASSWORD="${PGPASSWORD}"
+  DB_NAME="${PGDATABASE}"
+  generate_userlist_if_needed
+elif [ -n "${DATABASE_URLS}" ]; then
   echo "${DATABASE_URLS}" | tr , '\n' | while read url; do
     parse_url "$url"
     generate_userlist_if_needed
@@ -106,7 +117,10 @@ if [ ! -f "${PG_CONFIG_FILE}" ]; then
 [databases]
 " > "${PG_CONFIG_FILE}"
 
-  if [ -n "$DATABASE_URLS" ]; then
+  if [ -n "$UPSTREAM_POSTGRESQL_HOST" ]; then
+    # DB_* were assembled from UPSTREAM_POSTGRESQL_HOST + libpq vars above
+    generate_config_db_entry
+  elif [ -n "$DATABASE_URLS" ]; then
     echo "$DATABASE_URLS" | tr , '\n' | while read url; do
       parse_url "$url"
       generate_config_db_entry
