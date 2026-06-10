@@ -19,8 +19,8 @@ Two defaults differ from the upstream image:
 | `AUTH_TYPE` | `md5` | `scram-sha-256` | Railway Postgres uses SCRAM password encryption |
 
 Everything else matches upstream: configuration is generated from environment
-variables on first start (`DATABASE_URL` or `DB_HOST`/`DB_PORT`/`DB_USER`/
-`DB_PASSWORD`/`DB_NAME` for the upstream database, plus `POOL_MODE`,
+variables on first start (`DATABASE_URL` or `UPSTREAM_POSTGRESQL_HOST`/`PGPORT`/`PGUSER`/
+`PGPASSWORD`/`PGNAME` for the upstream database, plus `POOL_MODE`,
 `MAX_CLIENT_CONN`, `DEFAULT_POOL_SIZE`, `MAX_PREPARED_STATEMENTS`, TLS
 settings, and the rest — see `entrypoint.sh`). Mounting your own
 `/etc/pgbouncer/pgbouncer.ini` skips generation entirely.

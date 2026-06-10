@@ -29,7 +29,7 @@ fi
 #
 # Parameters:
 #   - The url we should parse
-# Returns (sets variables): DB_USER, DB_PASSWORD, DB_HOST, DB_PORT, DB_NAME
+# Returns (sets variables): PGUSER, PGPASSWORD, UPSTREAM_POSTGRESQL_HOST, PGPORT, PGDATABASE
 function parse_url() {
   # Thanks to https://stackoverflow.com/a/17287984/146289
 
@@ -39,44 +39,44 @@ function parse_url() {
 
   # extract the user and password (if any)
   userpass="$(echo $url | grep @ | sed -r 's/^(.*)@([^@]*)$/\1/')"
-  DB_PASSWORD="$(echo $userpass | grep : | cut -d: -f2)"
-  if [ -n "${DB_PASSWORD}" ]; then
-    DB_USER="$(echo $userpass | grep : | cut -d: -f1)"
+  PGPASSWORD="$(echo $userpass | grep : | cut -d: -f2)"
+  if [ -n "${PGPASSWORD}" ]; then
+    PGUSER="$(echo $userpass | grep : | cut -d: -f1)"
   else
-    DB_USER="${userpass}"
+    PGUSER="${userpass}"
   fi
 
   # extract the host -- updated
   hostport=`echo $url | sed -e s,$userpass@,,g | cut -d/ -f1`
   port=`echo $hostport | grep : | cut -d: -f2`
   if [ -n "$port" ]; then
-    DB_HOST=`echo $hostport | grep : | cut -d: -f1`
-    DB_PORT="${port}"
+    UPSTREAM_POSTGRESQL_HOST=`echo $hostport | grep : | cut -d: -f1`
+    PORT="${port}"
   else
-    DB_HOST="${hostport}"
+    UPSTREAM_POSTGRESQL_HOST="${hostport}"
   fi
 
-  DB_NAME="$(echo $url | grep / | cut -d/ -f2-)"
+  PGDATABASE="$(echo $url | grep / | cut -d/ -f2-)"
 }
 
 # Grabs variables set by `parse_url` and adds them to the userlist if not already set in there.
 function generate_userlist_if_needed() {
-  if [ -n "${DB_USER}" -a -n "${DB_PASSWORD}" -a -e "${_AUTH_FILE}" ] && ! grep -q "^\"${DB_USER}\"" "${_AUTH_FILE}"; then
+  if [ -n "${PGUSER}" -a -n "${PGPASSWORD}" -a -e "${_AUTH_FILE}" ] && ! grep -q "^\"${PGUSER}\"" "${_AUTH_FILE}"; then
     if [ "${AUTH_TYPE}" == "plain" ] || [ "${AUTH_TYPE}" == "scram-sha-256" ]; then
-      pass="${DB_PASSWORD}"
+      pass="${PGPASSWORD}"
     else
-      pass="md5$(echo -n "${DB_PASSWORD}${DB_USER}" | md5sum | cut -f 1 -d ' ')"
+      pass="md5$(echo -n "${PGPASSWORD}${PGUSER}" | md5sum | cut -f 1 -d ' ')"
     fi
-    echo "\"${DB_USER}\" \"${pass}\"" >> "${_AUTH_FILE}"
-    echo "Wrote authentication credentials for '${DB_USER}' to ${_AUTH_FILE}"
+    echo "\"${PGUSER}\" \"${pass}\"" >> "${_AUTH_FILE}"
+    echo "Wrote authentication credentials for '${PGUSER}' to ${_AUTH_FILE}"
   fi
 }
 
 # Grabs variables set by `parse_url` and adds them to the PG config file as a database entry.
 function generate_config_db_entry() {
   printf "\
-${DB_NAME:-*} = host=${DB_HOST:?"Setup pgbouncer config error! You must set DB_HOST env"} \
-port=${DB_PORT:-5432} auth_user=${DB_USER:-postgres}
+${PGDATABASE:-*} = host=${UPSTREAM_POSTGRESQL_HOST:?"Setup pgbouncer config error! You must set UPSTREAM_POSTGRESQL_HOST env"} \
+port=${PORT:-5432} auth_user=${PGUSER:-postgres}
 ${CLIENT_ENCODING:+client_encoding = ${CLIENT_ENCODING}\n}\
 " >> "${PG_CONFIG_FILE}"
 }
@@ -137,7 +137,7 @@ ${DEFAULT_POOL_SIZE:+default_pool_size = ${DEFAULT_POOL_SIZE}\n}\
 ${MIN_POOL_SIZE:+min_pool_size = ${MIN_POOL_SIZE}\n}\
 ${RESERVE_POOL_SIZE:+reserve_pool_size = ${RESERVE_POOL_SIZE}\n}\
 ${RESERVE_POOL_TIMEOUT:+reserve_pool_timeout = ${RESERVE_POOL_TIMEOUT}\n}\
-${MAX_DB_CONNECTIONS:+max_db_connections = ${MAX_DB_CONNECTIONS}\n}\
+${MAX_CONNECTIONS:+max_db_connections = ${MAX_DB_CONNECTIONS}\n}\
 ${MAX_USER_CONNECTIONS:+max_user_connections = ${MAX_USER_CONNECTIONS}\n}\
 ${SERVER_ROUND_ROBIN:+server_round_robin = ${SERVER_ROUND_ROBIN}\n}\
 ignore_startup_parameters = ${IGNORE_STARTUP_PARAMETERS:-extra_float_digits}
@@ -167,7 +167,7 @@ ${SERVER_IDLE_TIMEOUT:+server_idle_timeout = ${SERVER_IDLE_TIMEOUT}\n}\
 ${SERVER_CONNECT_TIMEOUT:+server_connect_timeout = ${SERVER_CONNECT_TIMEOUT}\n}\
 ${SERVER_LOGIN_RETRY:+server_login_retry = ${SERVER_LOGIN_RETRY}\n}\
 ${CLIENT_LOGIN_TIMEOUT:+client_login_timeout = ${CLIENT_LOGIN_TIMEOUT}\n}\
-${AUTODB_IDLE_TIMEOUT:+autodb_idle_timeout = ${AUTODB_IDLE_TIMEOUT}\n}\
+${AUTOIDLE_TIMEOUT:+autodb_idle_timeout = ${AUTODB_IDLE_TIMEOUT}\n}\
 ${DNS_MAX_TTL:+dns_max_ttl = ${DNS_MAX_TTL}\n}\
 ${DNS_NXDOMAIN_TTL:+dns_nxdomain_ttl = ${DNS_NXDOMAIN_TTL}\n}\
 
