@@ -51,7 +51,7 @@ function parse_url() {
   port=`echo $hostport | grep : | cut -d: -f2`
   if [ -n "$port" ]; then
     UPSTREAM_POSTGRESQL_HOST=`echo $hostport | grep : | cut -d: -f1`
-    PORT="${port}"
+    DB_PORT="${port}"
   else
     UPSTREAM_POSTGRESQL_HOST="${hostport}"
   fi
@@ -76,7 +76,7 @@ function generate_userlist_if_needed() {
 function generate_config_db_entry() {
   printf "\
 ${PGDATABASE:-*} = host=${UPSTREAM_POSTGRESQL_HOST:?"Setup pgbouncer config error! You must set UPSTREAM_POSTGRESQL_HOST env"} \
-port=${PORT:-5432} auth_user=${PGUSER:-postgres}
+port=${DB_PORT:-5432} auth_user=${PGUSER:-postgres}
 ${CLIENT_ENCODING:+client_encoding = ${CLIENT_ENCODING}\n}\
 " >> "${PG_CONFIG_FILE}"
 }
