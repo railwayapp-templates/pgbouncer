@@ -5,6 +5,8 @@
 #     connections (upstream default 0.0.0.0 is IPv4-only)
 #   - auth_type defaults to scram-sha-256 to match Railway Postgres password
 #     encryption (with md5, pgbouncer cannot answer the client SCRAM exchange)
+#   - client_tls_sslmode defaults to allow, backed by a freshly generated
+#     self-signed cert, so client connections aren't plaintext-only by default
 
 set -e
 
@@ -108,6 +110,28 @@ fi
 
 if [ ! -f "${PG_CONFIG_FILE}" ]; then
   echo "Creating pgbouncer config in ${PG_CONFIG_DIR}"
+
+  # Railway: opportunistic TLS on client connections by default. "allow"
+  # keeps plaintext clients working unchanged; a client that requests TLS
+  # negotiates it against this self-signed cert instead of pgbouncer's
+  # upstream default of client_tls_sslmode=disable (hard refusal). Skipped
+  # entirely if the operator already set CLIENT_TLS_SSLMODE, or brought
+  # their own cert/key — this only fills the gap when TLS was never
+  # configured at all. No persistent volume backs this image, so the cert
+  # regenerates every boot; that's fine for opportunistic encryption, since
+  # a self-signed cert doesn't authenticate server identity either way.
+  CLIENT_TLS_SSLMODE="${CLIENT_TLS_SSLMODE:-allow}"
+  if [ "${CLIENT_TLS_SSLMODE}" != "disable" ] && [ -z "${CLIENT_TLS_CERT_FILE}" ] && [ -z "${CLIENT_TLS_KEY_FILE}" ]; then
+    TLS_DIR="${PG_CONFIG_DIR}/tls"
+    mkdir -p "${TLS_DIR}"
+    openssl req -new -x509 -days "${CLIENT_TLS_CERT_DAYS:-820}" -nodes \
+      -subj "/CN=localhost" \
+      -out "${TLS_DIR}/server.crt" -keyout "${TLS_DIR}/server.key" \
+      >/dev/null 2>&1
+    chmod 600 "${TLS_DIR}/server.key"
+    CLIENT_TLS_CERT_FILE="${TLS_DIR}/server.crt"
+    CLIENT_TLS_KEY_FILE="${TLS_DIR}/server.key"
+  fi
 
   # Config file is in "ini" format. Section names are between "[" and "]".
   # Lines starting with ";" or "#" are taken as comments and ignored.

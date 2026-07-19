@@ -11,12 +11,21 @@ fresh alpine base.
 
 ## Railway-specific defaults
 
-Two defaults differ from the upstream image:
+Three defaults differ from the upstream image:
 
 | Setting | Upstream | Here | Why |
 |---|---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0` | `*` | Railway's private network is IPv6; `0.0.0.0` only binds IPv4 |
 | `AUTH_TYPE` | `md5` | `scram-sha-256` | Railway Postgres uses SCRAM password encryption |
+| `CLIENT_TLS_SSLMODE` | `disable` | `allow` | Plaintext clients still work; a client that requests TLS gets it against a freshly generated self-signed cert instead of a hard refusal |
+
+The self-signed cert (`/etc/pgbouncer/tls/{server.crt,server.key}`) is
+generated on every boot — this image has no persistent volume, and a
+self-signed cert doesn't authenticate server identity either way, so
+regenerating it each start is fine for opportunistic encryption. Set
+`CLIENT_TLS_SSLMODE` yourself (e.g. `disable`, or `require`/`verify-full`
+alongside your own `CLIENT_TLS_CERT_FILE`/`CLIENT_TLS_KEY_FILE`) to opt out
+of the generated cert or tighten the requirement.
 
 Everything else matches upstream: configuration is generated from environment
 variables on first start (`UPSTREAM_POSTGRESQL_HOST` + `PGPORT`/`PGUSER`/

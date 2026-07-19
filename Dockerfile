@@ -13,7 +13,7 @@ RUN cd /pgbouncer && ./configure --prefix=/usr && make -j$(nproc) pgbouncer && s
 
 FROM alpine:3.23
 
-RUN apk add --no-cache libevent postgresql-client && \
+RUN apk add --no-cache libevent openssl postgresql-client && \
   mkdir -p /etc/pgbouncer /var/log/pgbouncer /var/run/pgbouncer && \
   touch /etc/pgbouncer/userlist.txt && \
   chown -R postgres /var/log/pgbouncer /var/run/pgbouncer /etc/pgbouncer
