@@ -7,6 +7,15 @@
 #     encryption (with md5, pgbouncer cannot answer the client SCRAM exchange)
 #   - client_tls_sslmode defaults to allow, backed by a freshly generated
 #     self-signed cert, so client connections aren't plaintext-only by default
+#   - PGDATABASE defaults to "*" (generate_config_db_entry, below) — inherited
+#     from upstream, but now a deliberate Railway default, not just an
+#     unexamined inherited quirk: leaving PGDATABASE unset renders PgBouncer's
+#     wildcard `[databases]` entry instead of one pinned to a single database,
+#     so a single pooler reaches every database on the upstream Postgres
+#     instance rather than just the one it happened to boot with. Railway's
+#     postgres-with-pgbouncer template relies on this directly — it declares
+#     no PGDATABASE at all rather than duplicating "*" in two places. See
+#     t_wildcard_implicit_default_when_pgdatabase_unset in test/e2e.sh.
 
 set -e
 
