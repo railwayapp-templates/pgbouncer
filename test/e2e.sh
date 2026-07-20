@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# test/e2e.sh — end-to-end harness for this image's TLS defaulting
-# behavior. Mirrors postgres-ssl's test/e2e.sh / postgres-ha's
-# test/e2e-ha.sh harness shape (color helpers, t_* functions, assert_*,
-# ALL_TESTS dispatch).
+# test/e2e.sh — end-to-end harness for this image's TLS defaulting and
+# multi-database wildcard-routing behavior. Mirrors postgres-ssl's
+# test/e2e.sh / postgres-ha's test/e2e-ha.sh harness shape (color helpers,
+# t_* functions, assert_*, ALL_TESTS dispatch).
 #
 # Boots this image against a plain postgres:16-alpine upstream (and, for
 # the server-side test, the real ghcr.io/railwayapp-templates/postgres-ssl
 # image) and walks every assertion about client_tls_sslmode/server_tls_sslmode
-# defaulting. Each assertion is a `t_*` function; final exit code is the
-# count of failed tests.
+# defaulting, plus the wildcard `[databases]` entry (PGDATABASE=*) that lets
+# a single pooler reach every database on the upstream instead of just one —
+# Railway's postgres-with-pgbouncer template now defaults to this. Each
+# assertion is a `t_*` function; final exit code is the count of failed tests.
 #
 # Run: ./test/e2e.sh
 # Or:  ./test/e2e.sh t_tls_allow_default_accepts_both   # subset
@@ -91,6 +93,13 @@ ensure_upstream() {
     -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=testpass -e POSTGRES_DB=railway \
     postgres:16-alpine >/dev/null
   wait_for_pg_exec "$UPSTREAM"
+
+  # Extra databases beyond the default "railway" — this is exactly the
+  # customer-reported shape (many databases on one Postgres instance) that
+  # the wildcard `[databases]` entry is meant to reach. Created once here so
+  # every wildcard-routing test below can share them without recreating.
+  docker exec "$UPSTREAM" psql -U postgres -c "CREATE DATABASE second_db" >/dev/null 2>&1 || true
+  docker exec "$UPSTREAM" psql -U postgres -c "CREATE DATABASE third_db" >/dev/null 2>&1 || true
 }
 
 wait_for_pg_exec() {
@@ -117,12 +126,15 @@ cleanup_test_resources() {
 
 # Boots a pgbouncer container against $UPSTREAM with the given extra
 # `docker run` args, and waits until it's accepting connections on 5432.
+# PGDATABASE defaults to "*" (the wildcard fallback entry) — this is
+# Railway's actual production default for postgres-with-pgbouncer, so the
+# whole suite exercises that config unless a test explicitly overrides it.
 start_bouncer() {
   local name="$1"; shift
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --label pgbouncer-e2e=1 --network "$NET" \
     -e UPSTREAM_POSTGRESQL_HOST="$UPSTREAM" \
-    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE=railway -e PGPORT=5432 \
+    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE='*' -e PGPORT=5432 \
     "$@" \
     "$IMAGE" >/dev/null
   local deadline=$(($(date +%s) + 30))
@@ -216,7 +228,7 @@ t_tls_custom_cert_respected() {
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --label pgbouncer-e2e=1 --network "$NET" \
     -e UPSTREAM_POSTGRESQL_HOST="$UPSTREAM" \
-    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE=railway -e PGPORT=5432 \
+    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE='*' -e PGPORT=5432 \
     -e CLIENT_TLS_SSLMODE=require \
     -e CLIENT_TLS_CERT_FILE=/custom-tls/custom.crt \
     -e CLIENT_TLS_KEY_FILE=/custom-tls/custom.key \
@@ -299,7 +311,7 @@ t_server_tls_prefer_encrypts_against_ssl_upstream() {
   docker rm -f "$name" >/dev/null 2>&1 || true
   docker run -d --name "$name" --label pgbouncer-e2e=1 --network "$NET" \
     -e UPSTREAM_POSTGRESQL_HOST="$ssl_up" \
-    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE=railway -e PGPORT=5432 \
+    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE='*' -e PGPORT=5432 \
     "$IMAGE" >/dev/null
 
   local deadline=$(($(date +%s) + 30)) up=0
@@ -326,6 +338,168 @@ t_server_tls_prefer_encrypts_against_ssl_upstream() {
   docker volume rm pgb-e2e-ssl-vol >/dev/null 2>&1 || true
 }
 
+# ----- wildcard multi-database routing ---------------------------------------
+# Railway's postgres-with-pgbouncer template defaults PGDATABASE to "*"
+# instead of pinning to one database — the customer-reported bug this fixes
+# was "no such database" for every database on the upstream except the
+# default one. These tests exercise that config end-to-end: multiple real
+# databases, the image's own implicit default (no PGDATABASE set at all),
+# a genuinely-missing database, per-database pool visibility, auth_query
+# composed with wildcard routing, and — as a control — that the old
+# single-database pin still behaves the old way (so these tests are
+# actually exercising the wildcard, not just always-permissive routing).
+
+t_wildcard_routes_multiple_databases() {
+  local name=t-wildcard-multi
+  start_bouncer "$name" || { ko t_wildcard_routes_multiple_databases "pgbouncer did not come up"; fail_dump t_wildcard_routes_multiple_databases "$name"; return; }
+
+  local db out
+  for db in railway second_db third_db; do
+    out=$(docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/${db}?sslmode=disable" -At -c "select current_database()" 2>&1)
+    assert_eq "$out" "$db" "wildcard entry should route to ${db} through the pooler" || { ko t_wildcard_routes_multiple_databases "failed on ${db}"; fail_dump t_wildcard_routes_multiple_databases "$name"; return; }
+  done
+
+  ok t_wildcard_routes_multiple_databases
+  docker rm -f "$name" >/dev/null
+}
+
+t_wildcard_implicit_default_when_pgdatabase_unset() {
+  # The entrypoint's own generate_config_db_entry falls back to "*" when
+  # PGDATABASE isn't set at all (${PGDATABASE:-*}) — Railway now sets it
+  # explicitly, but the image's inherent default must independently work
+  # too, since anyone booting this image directly (not through Railway's
+  # template) relies on it.
+  local name=t-wildcard-implicit-default
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" --label pgbouncer-e2e=1 --network "$NET" \
+    -e UPSTREAM_POSTGRESQL_HOST="$UPSTREAM" \
+    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGPORT=5432 \
+    "$IMAGE" >/dev/null
+
+  local deadline=$(($(date +%s) + 30)) up=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/second_db?sslmode=disable" -c "select 1" >/dev/null 2>&1 && { up=1; break; }
+    sleep 1
+  done
+  if [ "$up" -ne 1 ]; then
+    ko t_wildcard_implicit_default_when_pgdatabase_unset "pgbouncer did not come up, or second_db wasn't reachable, with PGDATABASE entirely unset"
+    fail_dump t_wildcard_implicit_default_when_pgdatabase_unset "$name"
+    return
+  fi
+
+  local entry
+  entry=$(docker exec "$name" sed -n '/\[databases\]/,/^\[/p' /etc/pgbouncer/pgbouncer.ini | grep -F '=')
+  assert_contains "$entry" "* = host=" "the rendered [databases] entry should be the wildcard, not a pinned name" || { ko t_wildcard_implicit_default_when_pgdatabase_unset ""; fail_dump t_wildcard_implicit_default_when_pgdatabase_unset "$name"; return; }
+
+  ok t_wildcard_implicit_default_when_pgdatabase_unset
+  docker rm -f "$name" >/dev/null
+}
+
+t_wildcard_nonexistent_database_surfaces_postgres_error() {
+  # A database the wildcard forwards to but that genuinely doesn't exist on
+  # the upstream must fail with POSTGRES's error ("does not exist"), not
+  # silently hang or get a PgBouncer-level rejection — proving the wildcard
+  # entry forwards blindly and Postgres itself remains the source of truth.
+  local name=t-wildcard-missing-db
+  start_bouncer "$name" || { ko t_wildcard_nonexistent_database_surfaces_postgres_error "pgbouncer did not come up"; fail_dump t_wildcard_nonexistent_database_surfaces_postgres_error "$name"; return; }
+
+  local out
+  out=$(docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/totally_made_up_db?sslmode=disable" -c "select 1" 2>&1)
+  assert_contains "$out" "does not exist" "a genuinely-missing database should surface Postgres's own error through the pooler" || { ko t_wildcard_nonexistent_database_surfaces_postgres_error ""; fail_dump t_wildcard_nonexistent_database_surfaces_postgres_error "$name"; return; }
+
+  ok t_wildcard_nonexistent_database_surfaces_postgres_error
+  docker rm -f "$name" >/dev/null
+}
+
+t_wildcard_independent_pools_per_database() {
+  # Once clients have actually connected to more than one database through
+  # the wildcard entry, pgbouncer's admin console should list a distinct
+  # pool per database — the pooling story downstream monitoring (databaseCount
+  # in Railway's pgbouncer-monitor) depends on, not just "everything works
+  # under one shared pool".
+  local name=t-wildcard-pools
+  start_bouncer "$name" || { ko t_wildcard_independent_pools_per_database "pgbouncer did not come up"; fail_dump t_wildcard_independent_pools_per_database "$name"; return; }
+
+  docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/railway?sslmode=disable" -c "select 1" >/dev/null 2>&1
+  docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/second_db?sslmode=disable" -c "select 1" >/dev/null 2>&1
+  docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/third_db?sslmode=disable" -c "select 1" >/dev/null 2>&1
+
+  local databases
+  databases=$(docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/pgbouncer?sslmode=disable" -At -F'|' -c "SHOW DATABASES" 2>&1 | cut -d'|' -f1)
+  local db
+  for db in railway second_db third_db; do
+    if ! echo "$databases" | grep -qxF "$db"; then
+      ko t_wildcard_independent_pools_per_database "expected SHOW DATABASES to list a distinct pool for ${db}, got: $databases"
+      fail_dump t_wildcard_independent_pools_per_database "$name"
+      return
+    fi
+  done
+
+  ok t_wildcard_independent_pools_per_database
+  docker rm -f "$name" >/dev/null
+}
+
+t_wildcard_auth_query_role_reaches_other_database() {
+  # Mirrors Railway's actual production config: AUTH_USER/AUTH_QUERY let
+  # pgbouncer authenticate a role that's NOT in the static userlist.txt (only
+  # the boot-time PGUSER is) by looking it up in pg_shadow at login time. This
+  # confirms that composes correctly with the wildcard entry — a second role,
+  # unknown to pgbouncer at boot, reaching a non-default database.
+  local name=t-wildcard-auth-query
+  docker exec "$UPSTREAM" psql -U postgres -c "CREATE ROLE otheruser LOGIN PASSWORD 'otherpass'" >/dev/null 2>&1 || true
+  docker exec "$UPSTREAM" psql -U postgres -d second_db -c "GRANT ALL ON SCHEMA public TO otheruser" >/dev/null 2>&1 || true
+
+  start_bouncer "$name" \
+    -e AUTH_USER=postgres \
+    -e AUTH_QUERY='SELECT usename, passwd FROM pg_shadow WHERE usename=$1' \
+    || { ko t_wildcard_auth_query_role_reaches_other_database "pgbouncer did not come up"; fail_dump t_wildcard_auth_query_role_reaches_other_database "$name"; return; }
+
+  local out
+  out=$(docker exec "$name" psql "postgresql://otheruser:otherpass@localhost:5432/second_db?sslmode=disable" -At -c "select current_user" 2>&1)
+  assert_eq "$out" "otheruser" "a role resolved only via auth_query (not the boot-time userlist) should reach a non-default database through the wildcard entry" || { ko t_wildcard_auth_query_role_reaches_other_database ""; fail_dump t_wildcard_auth_query_role_reaches_other_database "$name"; return; }
+
+  ok t_wildcard_auth_query_role_reaches_other_database
+  docker rm -f "$name" >/dev/null
+}
+
+t_explicit_single_database_pin_still_works() {
+  # Control case: an operator who explicitly pins PGDATABASE to one database
+  # (the pre-wildcard default, and still valid config) should keep getting
+  # the OLD behavior — the pinned database works, everything else gets
+  # PgBouncer's own "no such database" rejection. This is the exact error
+  # string from the original customer report; proves it's still reachable
+  # for anyone who wants a single-database pool, and that the wildcard tests
+  # above are actually exercising the wildcard rather than pgbouncer just
+  # permitting everything unconditionally.
+  local name=t-single-db-pin
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  docker run -d --name "$name" --label pgbouncer-e2e=1 --network "$NET" \
+    -e UPSTREAM_POSTGRESQL_HOST="$UPSTREAM" \
+    -e PGUSER=postgres -e PGPASSWORD=testpass -e PGDATABASE=railway -e PGPORT=5432 \
+    "$IMAGE" >/dev/null
+  local deadline=$(($(date +%s) + 30)) up=0
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/railway?sslmode=disable" -c "select 1" >/dev/null 2>&1 && { up=1; break; }
+    sleep 1
+  done
+  if [ "$up" -ne 1 ]; then
+    ko t_explicit_single_database_pin_still_works "pgbouncer did not come up with an explicit single-database pin"
+    fail_dump t_explicit_single_database_pin_still_works "$name"
+    return
+  fi
+
+  local pinned
+  pinned=$(docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/railway?sslmode=disable" -At -c "select current_database()" 2>&1)
+  assert_eq "$pinned" "railway" "the pinned database should still work" || { ko t_explicit_single_database_pin_still_works ""; fail_dump t_explicit_single_database_pin_still_works "$name"; return; }
+
+  local rejected
+  rejected=$(docker exec "$name" psql "postgresql://postgres:testpass@localhost:5432/second_db?sslmode=disable" -c "select 1" 2>&1)
+  assert_contains "$rejected" "no such database" "a database outside the pin should get PgBouncer's own rejection, not be silently routed" || { ko t_explicit_single_database_pin_still_works ""; fail_dump t_explicit_single_database_pin_still_works "$name"; return; }
+
+  ok t_explicit_single_database_pin_still_works
+  docker rm -f "$name" >/dev/null
+}
+
 ALL_TESTS=(
   t_vanilla_boot
   t_tls_allow_default_accepts_both
@@ -333,6 +507,12 @@ ALL_TESTS=(
   t_tls_custom_cert_respected
   t_server_tls_scope_unchanged
   t_server_tls_prefer_encrypts_against_ssl_upstream
+  t_wildcard_routes_multiple_databases
+  t_wildcard_implicit_default_when_pgdatabase_unset
+  t_wildcard_nonexistent_database_surfaces_postgres_error
+  t_wildcard_independent_pools_per_database
+  t_wildcard_auth_query_role_reaches_other_database
+  t_explicit_single_database_pin_still_works
 )
 
 trap 'cleanup_test_resources' EXIT
