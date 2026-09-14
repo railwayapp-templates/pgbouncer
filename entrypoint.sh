@@ -256,4 +256,12 @@ ${TCP_USER_TIMEOUT:+tcp_user_timeout = ${TCP_USER_TIMEOUT}\n}\
 fi
 
 echo "Starting $*..."
+# Structured SLI heartbeat for the Postgres HA uptime passive layer. Dual-read
+# with the stock "LOG stats:" line until the fleet rolls this image.
+(
+  while true; do
+    echo "sli pgbouncer up=1"
+    sleep 60
+  done
+) &
 exec "$@"
